@@ -1,0 +1,562 @@
+# Rust Integer Overflow CVE Analysis
+
+This document analyzes 3 Rust CVEs related to integer overflows with vulnerable code examples and explanations.
+
+---
+
+## CVE-2025-48756: scsir Hardware Bit Field Overflow
+
+**Crate:** `scsir` (SCSI command library)  
+**Version:** 0.2.0  
+**Impact:** Incorrect SCSI commands sent to hardware devices  
+**Type:** Integer overflow in hardware bit fields
+
+### The Bug
+
+SCSI command descriptors contain fields that only occupy a small number of bits (e.g., 5 bits for group_number). The Rust API accepts larger integer types (like `u8`) without validating that values fit within the hardware-defined bit width. When values exceed the bit field capacity, they overflow/truncate, causing incorrect command bytes to be sent to hardware.
+
+### Background: SCSI Command Structure
+
+SCSI commands are structured byte sequences sent to storage devices. Many fields occupy only a few bits within a byte:
+
+```
+SCSI Command Descriptor Block (CDB) - Example Layout:
+┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐
+│ Byte 0  │ Byte 1  │ Byte 2  │ Byte 3  │ Byte 4  │ Byte 5  │
+│ OpCode  │ Misc    │ LBA     │ LBA     │ Length  │ Control │
+│ (8 bit) │ (8 bit) │ (8 bit) │ (8 bit) │ (8 bit) │ (8 bit) │
+└─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
+
+Byte 1 breakdown (for some commands):
+┌───┬───┬───┬───┬───┬───┬───┬───┐
+│ 7 │ 6 │ 5 │ 4 │ 3 │ 2 │ 1 │ 0 │
+├───┴───┴───┼───┴───┴───┴───┴───┤
+│ Reserved  │   Group Number    │
+│  (3 bits) │     (5 bits)      │
+└───────────┴───────────────────┘
+Group number can only be 0-31 (5 bits = 2^5 - 1 = 31)
+```
+
+### Vulnerable Code Pattern
+
+```rust
+pub struct ReadCommand {
+    logical_block_address: u64,
+    transfer_length: u32,
+    group_number: u8,  // API accepts 0-255, but hardware only uses 5 bits!
+    // ... other fields
+}
+
+impl ReadCommand {
+    /// Set the group number for this command
+    pub fn group_number(&mut self, group: u8) -> &mut Self {
+        // BUG: No validation that group fits in 5 bits!
+        // Hardware expects 0-31, but we accept 0-255
+        self.group_number = group;
+        self
+    }
+    
+    /// Build the SCSI Command Descriptor Block
+    pub fn build_cdb(&self) -> [u8; 16] {
+        let mut cdb = [0u8; 16];
+        
+        cdb[0] = 0x88;  // READ(16) opcode
+        
+        // ... set LBA bytes ...
+        
+        // BUG: Truncation happens here when packing into byte
+        // If group_number = 0xFF (255), only low 5 bits (0x1F = 31) are used
+        // But the upper 3 bits ALSO get written, corrupting reserved bits!
+        cdb[14] = self.group_number;  // Should mask: & 0x1F
+        
+        // ... set other fields ...
+        
+        cdb
+    }
+}
+```
+
+### Exploitation Scenario
+
+```rust
+use scsir::Scsi;
+
+fn main() -> scsir::Result<()> {
+    let scsi = Scsi::new("/dev/sda")?;
+    
+    // User passes value that exceeds 5-bit capacity
+    scsi.read()
+        .logical_block_address(0)
+        .transfer_length(1)
+        .group_number(0xFF)  // 255 - but field is only 5 bits!
+        .issue_16()?;
+    
+    // What gets sent to hardware:
+    // Expected: group_number masked to 5 bits = 0x1F (31)
+    // Actual: Full byte 0xFF written, corrupting reserved bits!
+    //
+    // Some devices may:
+    // - Reject the command with an error
+    // - Behave unexpectedly due to reserved bits being set
+    // - Interpret as a different command variant
+    
+    Ok(())
+}
+```
+
+### The Problem Illustrated
+
+```
+User provides: group_number = 200 (0xC8 = 0b11001000)
+
+Hardware field layout (Byte 14):
+┌───┬───┬───┬───┬───┬───┬───┬───┐
+│ 7 │ 6 │ 5 │ 4 │ 3 │ 2 │ 1 │ 0 │
+│ 1 │ 1 │ 0 │ 0 │ 1 │ 0 │ 0 │ 0 │  ← Full value 0xC8 written
+├───┴───┴───┼───┴───┴───┴───┴───┤
+│  CORRUPT  │  Group: 8 (0x08)  │
+│ Reserved  │  (5 bits used)    │
+└───────────┴───────────────────┘
+
+The reserved bits (7,6,5) should be 0 but are now 1,1,0!
+Hardware sees group_number = 8, but reserved bits are corrupted.
+```
+
+### The Fix
+
+```rust
+impl ReadCommand {
+    /// Set the group number for this command (0-31)
+    pub fn group_number(&mut self, group: u8) -> &mut Self {
+        // FIX: Validate value fits in 5 bits
+        assert!(group <= 31, "group_number must be 0-31 (5 bits)");
+        self.group_number = group;
+        self
+    }
+    
+    // Or use a safer approach with a newtype:
+    pub fn group_number_checked(&mut self, group: u8) -> Result<&mut Self, Error> {
+        if group > 31 {
+            return Err(Error::InvalidGroupNumber(group));
+        }
+        self.group_number = group;
+        Ok(self)
+    }
+    
+    pub fn build_cdb(&self) -> [u8; 16] {
+        let mut cdb = [0u8; 16];
+        cdb[0] = 0x88;
+        // ... 
+        
+        // FIX: Always mask to ensure reserved bits are not corrupted
+        cdb[14] = self.group_number & 0x1F;  // Mask to 5 bits
+        
+        // ...
+        cdb
+    }
+}
+```
+
+---
+
+## CVE-2024-58263: cosmwasm-std Arithmetic Overflows
+
+**Crate:** `cosmwasm-std` (CosmWasm smart contract standard library)  
+**Impact:** Wrong calculations in blockchain smart contracts  
+**Fixed in:** 1.4.4, 1.5.4, 2.0.2
+
+### The Bug
+
+Several mathematical operations in cosmwasm-std use wrapping arithmetic instead of panicking on overflow. For blockchain smart contracts handling financial calculations, silent overflow can lead to catastrophic errors like incorrect token balances or broken invariants.
+
+### Affected Functions
+
+1. **`Uint{256,512}::pow`** / **`Int{256,512}::pow`** - Always affected
+2. **`Int{256,512}::neg`** (unary `-` operator) - `MIN.neg()` overflows
+3. **`Uint{64,128}::pow`** / **`Int{64,128}::pow`** - Affected if `overflow-checks = true` is NOT set
+4. **`Int{64,128}::neg`** - Affected if `overflow-checks = true` is NOT set
+
+### Vulnerable Code Pattern: pow()
+
+```rust
+// In cosmwasm-std (simplified)
+impl Uint256 {
+    pub fn pow(self, exp: u32) -> Self {
+        // BUG: Uses wrapping multiplication internally
+        let mut result = Uint256::one();
+        let mut base = self;
+        let mut exp = exp;
+        
+        while exp > 0 {
+            if exp % 2 == 1 {
+                // BUG: wrapping_mul instead of checked_mul!
+                result = result.wrapping_mul(base);
+            }
+            // BUG: wrapping_mul instead of checked_mul!
+            base = base.wrapping_mul(base);
+            exp /= 2;
+        }
+        
+        result  // Silently returns wrong value on overflow!
+    }
+}
+```
+
+### Exploitation: Financial Calculation Error
+
+```rust
+use cosmwasm_std::Uint256;
+
+fn calculate_compound_interest(
+    principal: Uint256,
+    rate: Uint256,  // e.g., 1.05 represented as fixed-point
+    periods: u32,
+) -> Uint256 {
+    // Calculate (1 + rate)^periods
+    let multiplier = rate.pow(periods);
+    
+    // BUG: If rate^periods overflows, multiplier is WRONG
+    // but no error is raised!
+    
+    principal * multiplier  // Returns incorrect amount!
+}
+
+fn vulnerable_contract() {
+    // Attacker provides values that cause overflow
+    let principal = Uint256::from(1_000_000u128);
+    
+    // A large rate that will overflow when raised to power
+    let rate = Uint256::MAX / Uint256::from(2u128);
+    let periods = 10;
+    
+    // This SHOULD panic, but instead returns garbage!
+    let result = calculate_compound_interest(principal, rate, periods);
+    
+    // Contract proceeds with completely wrong value
+    // Could result in:
+    // - Minting way too few or too many tokens
+    // - Incorrect reward distributions  
+    // - Breaking protocol invariants
+}
+```
+
+### Vulnerable Code Pattern: neg() on MIN
+
+```rust
+impl Int256 {
+    pub fn neg(self) -> Self {
+        // BUG: Uses wrapping negation
+        // For MIN value, -MIN overflows because |MIN| > MAX
+        Self(self.0.wrapping_neg())
+    }
+}
+
+// Two's complement signed integers have asymmetric range:
+// Int256::MIN = -2^255
+// Int256::MAX = 2^255 - 1
+// 
+// Therefore: -Int256::MIN = 2^255, which EXCEEDS Int256::MAX!
+```
+
+### Exploitation: Negation Overflow
+
+```rust
+use cosmwasm_std::Int256;
+
+fn absolute_value(x: Int256) -> Int256 {
+    if x < Int256::zero() {
+        -x  // Uses neg() operator
+    } else {
+        x
+    }
+}
+
+fn vulnerable_abs() {
+    let min_value = Int256::MIN;
+    
+    // What SHOULD happen: panic because -MIN overflows
+    // What ACTUALLY happens: wraps to MIN again!
+    let abs_min = absolute_value(min_value);
+    
+    // abs_min == Int256::MIN (negative!)
+    // This violates the invariant that abs() returns non-negative!
+    
+    assert!(abs_min >= Int256::zero());  // FAILS!
+}
+```
+
+### The Fix
+
+```rust
+impl Uint256 {
+    pub fn pow(self, exp: u32) -> Self {
+        // FIX: Use checked multiplication with panic on overflow
+        let mut result = Uint256::one();
+        let mut base = self;
+        let mut exp = exp;
+        
+        while exp > 0 {
+            if exp % 2 == 1 {
+                result = result.checked_mul(base)
+                    .expect("overflow in Uint256::pow");
+            }
+            if exp > 1 {
+                base = base.checked_mul(base)
+                    .expect("overflow in Uint256::pow");
+            }
+            exp /= 2;
+        }
+        
+        result
+    }
+}
+
+impl Int256 {
+    pub fn neg(self) -> Self {
+        // FIX: Check for MIN value explicitly
+        if self == Self::MIN {
+            panic!("overflow when negating Int256::MIN");
+        }
+        Self(self.0.wrapping_neg())
+    }
+}
+```
+
+---
+
+## CVE-2023-22895: bzip2 Integer Overflow in mem.rs
+
+**Crate:** `bzip2`  
+**Impact:** Infinite loop / denial of service  
+**Fixed in:** 0.4.4
+
+### The Bug
+
+When decompressing files larger than 4GB on 64-bit systems, the buffer length (`usize`, which can exceed 2^32) gets truncated when cast to `c_uint` (32-bit unsigned int) for the underlying C library. This causes `avail_out` to become 0, making the decompressor think there's no output space available, resulting in an infinite loop.
+
+### Background: bzip2 Decompression
+
+The Rust bzip2 crate wraps the C libbz2 library. The C library uses a structure to track compression state:
+
+```c
+// C struct from libbz2
+typedef struct {
+    char *next_in;
+    unsigned int avail_in;   // 32-bit!
+    
+    char *next_out;  
+    unsigned int avail_out;  // 32-bit! Max value = 4,294,967,295
+    
+    // ... other fields
+} bz_stream;
+```
+
+### Vulnerable Code Pattern
+
+```rust
+// In bzip2 crate's mem.rs
+impl Decompress {
+    pub fn decompress(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<Status, Error> {
+        // Set up input buffer
+        self.inner.raw.next_in = input.as_ptr() as *mut _;
+        self.inner.raw.avail_in = input.len() as c_uint;  // OK for reasonable input
+        
+        // Set up output buffer
+        self.inner.raw.next_out = output.as_mut_ptr() as *mut _;
+        
+        // BUG: output.len() is usize (64-bit on 64-bit systems)
+        // c_uint is u32 - truncation occurs for buffers > 4GB!
+        self.inner.raw.avail_out = output.len() as c_uint;
+        
+        // Example: output.len() = 0x1_0000_0000 (4GB + 1 byte)
+        // After cast to c_uint: avail_out = 0x0000_0000 (0!)
+        
+        // Call C decompression function
+        let rc = unsafe {
+            ffi::BZ2_bzDecompress(&mut *self.inner.raw)
+        };
+        
+        // When avail_out = 0, C library returns immediately
+        // thinking there's no output space
+        // But caller still has data to decompress...
+        
+        match rc {
+            ffi::BZ_OK => Ok(Status::Ok),
+            ffi::BZ_STREAM_END => Ok(Status::StreamEnd),
+            // ...
+        }
+    }
+}
+```
+
+### The Infinite Loop Scenario
+
+```rust
+use bzip2::read::BzDecoder;
+use std::io::Read;
+use std::fs::File;
+
+fn decompress_large_file() {
+    // File decompresses to > 4GB
+    let file = File::open("huge_file.bz2").unwrap();
+    let mut decoder = BzDecoder::new(file);
+    
+    let mut output = String::new();
+    
+    // read_to_string internally uses an adaptive buffer that doubles
+    // Initial: 32 bytes, then 64, 128, ... eventually 8GB
+    
+    // When buffer reaches 8GB (0x2_0000_0000):
+    // - First 4GB contains decompressed data
+    // - Remaining 4GB is spare capacity for more data
+    // - spare.len() = 0x1_0000_0000 (exactly 2^32)
+    // - avail_out = spare.len() as c_uint = 0 (truncated!)
+    
+    decoder.read_to_string(&mut output).unwrap();  // INFINITE LOOP!
+    
+    // Loop forever because:
+    // 1. Caller: "decompress into this 4GB buffer"
+    // 2. Library: avail_out = 0, returns immediately, no data written
+    // 3. Caller: "no data? try again"
+    // 4. GOTO 1
+}
+```
+
+### Detailed Flow
+
+```
+Timeline of buffer growth and overflow:
+
+Step 1: Buffer = 32 bytes, avail_out = 32 ✓
+Step 2: Buffer = 64 bytes, avail_out = 64 ✓
+...
+Step N: Buffer = 4GB, avail_out = 4,294,967,296 ✓ (still fits in u32)
+Step N+1: Buffer = 8GB
+         Spare capacity = 4GB + 1 = 4,294,967,297
+         avail_out = 4,294,967,297 as u32 = 1 ✓ (lucky, still works)
+...
+Eventually: Spare capacity = 2^32 exactly = 4,294,967,296
+           avail_out = 4,294,967,296 as u32 = 0 ← BUG!
+
+When avail_out = 0:
+┌─────────────────────────────────────────────────────────┐
+│  BZ2_bzDecompress()                                     │
+│  "avail_out is 0, no space for output, return BZ_OK"   │
+└─────────────────────────────────────────────────────────┘
+           ↓
+┌─────────────────────────────────────────────────────────┐
+│  Rust decompress()                                      │
+│  "Got BZ_OK but wrote 0 bytes... try again?"           │
+└─────────────────────────────────────────────────────────┘
+           ↓
+    [Infinite loop]
+```
+
+### The Fix
+
+```rust
+impl Decompress {
+    pub fn decompress(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<Status, Error> {
+        self.inner.raw.next_in = input.as_ptr() as *mut _;
+        self.inner.raw.avail_in = input.len() as c_uint;
+        
+        self.inner.raw.next_out = output.as_mut_ptr() as *mut _;
+        
+        // FIX: Cap the length to c_uint::MAX to prevent truncation to 0
+        // If buffer is larger than 4GB, we'll decompress in chunks
+        self.inner.raw.avail_out = std::cmp::min(
+            output.len(),
+            c_uint::MAX as usize
+        ) as c_uint;
+        
+        // Now avail_out is at most u32::MAX, never 0 due to truncation
+        
+        let rc = unsafe {
+            ffi::BZ2_bzDecompress(&mut *self.inner.raw)
+        };
+        
+        // ... handle result
+    }
+}
+```
+
+---
+
+## Summary Table
+
+| CVE | Crate | Root Cause | Impact |
+|-----|-------|-----------|--------|
+| CVE-2025-48756 | scsir | API accepts values exceeding hardware bit field width | Corrupted SCSI commands |
+| CVE-2024-58263 | cosmwasm-std | `pow()` and `neg()` use wrapping instead of checked math | Wrong financial calculations |
+| CVE-2023-22895 | bzip2 | `usize` → `c_uint` truncation for buffers > 4GB | Infinite loop (DoS) |
+
+## Common Integer Overflow Patterns in Rust
+
+### 1. Bit Field Overflow
+When packing values into hardware registers or protocol fields with limited bit widths:
+```rust
+// BAD: No validation
+fn set_field(value: u8) { /* field is only 5 bits */ }
+
+// GOOD: Validate or use appropriate type
+fn set_field(value: u8) {
+    assert!(value <= 0x1F, "value exceeds 5-bit field");
+}
+```
+
+### 2. Wrapping vs Checked Arithmetic
+```rust
+// BAD: Silent overflow with wrapping_*
+let result = a.wrapping_mul(b);
+
+// GOOD: Panic on overflow
+let result = a.checked_mul(b).expect("overflow");
+// Or let Rust's default overflow checks catch it (debug mode)
+let result = a * b;
+```
+
+### 3. Cross-Type Truncation (FFI)
+```rust
+// BAD: Silent truncation when usize > u32
+let c_len = rust_slice.len() as c_uint;
+
+// GOOD: Cap to maximum representable value
+let c_len = std::cmp::min(rust_slice.len(), c_uint::MAX as usize) as c_uint;
+
+// BETTER: Return error if value doesn't fit
+let c_len: c_uint = rust_slice.len()
+    .try_into()
+    .map_err(|_| Error::BufferTooLarge)?;
+```
+
+### 4. Two's Complement Edge Cases
+```rust
+// BAD: Negating MIN overflows
+let neg = value.wrapping_neg();
+
+// GOOD: Check for MIN explicitly
+if value == i32::MIN {
+    panic!("cannot negate MIN");
+}
+let neg = -value;
+```
+
+## Rust's Overflow Behavior
+
+By default, Rust has different overflow behavior in debug vs release:
+
+- **Debug mode**: Integer overflow panics
+- **Release mode**: Integer overflow wraps (unless `overflow-checks = true` in Cargo.toml)
+
+For security-critical code, always:
+1. Use `checked_*` methods explicitly
+2. Set `overflow-checks = true` in release profile
+3. Validate inputs at API boundaries
