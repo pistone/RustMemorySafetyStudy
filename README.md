@@ -537,6 +537,9 @@ impl Instance {
 }
 ```
 This is similar to the MUTATE_IMMUTABLE checker above.
+
+The other three: one cannot be found. Another is shared memory -> &[u8] -> memory. The third is unexpected stack frame but only conceptual description is found.
+
 ### Buffer Overflow / Out-of-Bounds
 
 | CVE | Crate | Vulnerability Type |
@@ -599,6 +602,34 @@ impl<T: FamStruct> FamStructWrapper<T> {
     }
 }
 ```
+This part of failure can be detected with a TAINTED analysis. But looking further we found the root cause of overrun.
+
+```rust
+impl<T: FamStruct> FamStructWrapper<T> {
+    /// Returns the entries as a slice.
+    /// 
+    /// SAFETY: This is safe because we maintain the invariant that
+    /// `header.len()` always equals the actual number of allocated entries.
+    pub fn as_slice(&self) -> &[T::Entry] {
+        let header = self.as_fam_struct_ref();
+        let count = header.len();  // ← Length from header (trusted?)
+        
+        unsafe {
+            let entries_ptr = self.mem.as_ptr()
+                .add(std::mem::size_of::<T>())  // Skip header
+                as *const T::Entry;
+            
+            // Create slice with `count` elements
+            std::slice::from_raw_parts(entries_ptr, count)
+            //                                      ^^^^^
+            //                                      If count > actual allocation,
+            //                                      this creates an invalid slice
+        }
+    }
+}
+```
+Now an overrun happens when count mismatches entries_ptr's size. Unfortunately current OVERRUN does not have this capability.
+
 
 #### Code Example: Deno ArrayBuffer Shrink (CVE-2023-28445)
 
@@ -634,6 +665,7 @@ async fn read_into_buffer(buffer: &mut TypedArray) -> Result<usize> {
     Ok(slice.len())
 }
 ```
+What checker can check this?
 
 ### Integer Overflow
 
