@@ -739,7 +739,7 @@ Other cves are analyzed [here](./OverflowAnalysis.md)
 | **CVE-2024-1410** | Cloudflare quiche | Unbounded storage for connection ID |
 | **CVE-2023-39410** | Apache Avro | Out of memory from untrusted data |
 
-Two examples are below. Analysis results of others are in [here](./AllocationAnalysis.md)
+Two examples are below. Analysis results of others are in [here](./AllocationAnalysis.md). There are further issues with ZST handling and unlimited resource allocation. The former may suggest a new checker UNHANDLED_ZST; the latter may be handled by a variation of TAINTED when the unbounded resource creation is caused by untrusted input. When it is not, can we have an UNBOUNDED_RESOURCE_CREATION. The untracked stack growth below also belongs to this checker. 
 
 #### Code Example: Zero-Sized Type Allocation (CVE-2025-48755)
 
