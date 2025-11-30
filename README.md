@@ -555,6 +555,8 @@ The other three: one cannot be found. Another is shared memory -> &[u8] -> memor
 | **CVE-2023-28445** | Deno | Resizable ArrayBuffers shrunk during async operation |
 | **CVE-2023-3036** | cfnts | Panic from out-of-bounds read |
 
+Some can be checked with TAINTED analysis. A detailed analysis can be found in [See more details](./overunanalysis.md).
+
 #### Code Example: FamStructWrapper Buffer Overflow (CVE-2023-50711)
 
 ```rust
