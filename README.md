@@ -739,7 +739,11 @@ Other cves are analyzed [here](./OverflowAnalysis.md)
 | **CVE-2024-1410** | Cloudflare quiche | Unbounded storage for connection ID |
 | **CVE-2023-39410** | Apache Avro | Out of memory from untrusted data |
 
+Two examples are below. Analysis results of others are in [here](./AllocationAnalysis.md)
+
 #### Code Example: Zero-Sized Type Allocation (CVE-2025-48755)
+
+UNHANDLED_ZST?
 
 ```rust
 // VULNERABLE: Incorrect handling of zero-sized types
@@ -790,6 +794,8 @@ impl<T> Matrix<T> {
 ```
 
 #### Code Example: Unbounded Allocation from Untrusted Input (CVE-2024-32984)
+
+TAINTED
 
 ```rust
 // VULNERABLE: Yamux protocol - unbounded vector from network input
