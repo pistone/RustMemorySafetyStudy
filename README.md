@@ -2,7 +2,11 @@
 
 ## Overview
 
-This document analyzes 52 memory safety CVEs from the Rust ecosystem between 2023-2025, categorizing them based on whether they involve **C library FFI bindings** (unsafe Rust wrapping C/C++ libraries) or **pure Rust unsafe code** (no C FFI, internal unsafe blocks only).
+This document analyzes 52 memory safety CVEs from the Rust ecosystem between 2023-2025. The CVEs are categorized into several categories and sub-categories. For each (sub)category we briefly discuss if and how a checker might help catching bugs in that category. 
+
+### Note: AI usage in preparation of this document 
+
+For each CVE, we list its bug code if available. This step is assisted by AI and whether the bug code belongs to the CVE is not manually verified. We do interact with AI about the details of many of these CVEs and elect to trust AI on this. 
 
 ---
 
