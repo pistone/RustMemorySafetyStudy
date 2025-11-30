@@ -733,10 +733,8 @@ Other cves are analyzed [here](./OverflowAnalysis.md)
 |-----|-------|-------------------|
 | **CVE-2025-48755** | spiral-rs | Allocation for ZST (zero-sized type) |
 | **CVE-2024-32984** | Yamux | Unbounded vector for pending frames |
-
 | **CVE-2025-47737** | trailer | Mishandled zero-size allocation |
 | **CVE-2024-43410** | Russh | Untrusted memory allocation for OOM |
-
 | **CVE-2024-1765** | Cloudflare Quiche | Unlimited resource allocation |
 | **CVE-2024-1410** | Cloudflare quiche | Unbounded storage for connection ID |
 | **CVE-2023-39410** | Apache Avro | Out of memory from untrusted data |
