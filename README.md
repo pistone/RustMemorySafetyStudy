@@ -725,6 +725,8 @@ where T: Clone
 
 TAINTED_SCALAR
 
+Other cves are analyzed [here](./OverflowAnalysis.md)
+
 ### Memory Allocation / Resource Exhaustion
 
 | CVE | Crate | Vulnerability Type |
